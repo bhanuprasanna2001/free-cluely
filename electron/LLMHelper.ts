@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI, GenerativeModel } from "@google/generative-ai"
 import fs from "fs"
+import axios from "axios"
 
 interface OllamaResponse {
   response: string
@@ -10,13 +11,24 @@ export class LLMHelper {
   private model: GenerativeModel | null = null
   private readonly systemPrompt = `You are Wingman AI, a helpful, proactive assistant for any kind of problem or situation (not just coding). For any user input, analyze the situation, provide a clear problem statement, relevant context, and suggest several possible responses or actions the user could take next. Always explain your reasoning. Present your suggestions as a list of options or next steps.`
   private useOllama: boolean = false
+  private useOpenAI: boolean = false
   private ollamaModel: string = "llama3.2"
   private ollamaUrl: string = "http://localhost:11434"
+  private openaiApiKey: string = ""
+  private openaiModel: string = "gpt-4o"
 
-  constructor(apiKey?: string, useOllama: boolean = false, ollamaModel?: string, ollamaUrl?: string) {
+  constructor(apiKey?: string, useOllama: boolean = false, ollamaModel?: string, ollamaUrl?: string, useOpenAI: boolean = false, openaiModel?: string) {
     this.useOllama = useOllama
+    this.useOpenAI = useOpenAI
     
-    if (useOllama) {
+    if (useOpenAI) {
+      this.openaiApiKey = apiKey || ""
+      this.openaiModel = openaiModel || "gpt-4o"
+      console.log(`[LLMHelper] Using OpenAI with model: ${this.openaiModel}`)
+      if (!this.openaiApiKey) {
+        throw new Error("OpenAI API key is required when useOpenAI is true")
+      }
+    } else if (useOllama) {
       this.ollamaUrl = ollamaUrl || "http://localhost:11434"
       this.ollamaModel = ollamaModel || "gemma:latest" // Default fallback
       console.log(`[LLMHelper] Using Ollama with model: ${this.ollamaModel}`)
@@ -77,6 +89,121 @@ export class LLMHelper {
     } catch (error) {
       console.error("[LLMHelper] Error calling Ollama:", error)
       throw new Error(`Failed to connect to Ollama: ${error.message}. Make sure Ollama is running on ${this.ollamaUrl}`)
+    }
+  }
+
+  private async callOpenAI(messages: Array<{role: string, content: string | Array<any>}>): Promise<string> {
+    try {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.openaiApiKey}`,
+        },
+        body: JSON.stringify({
+          model: this.openaiModel,
+          messages: messages,
+          temperature: 0.7,
+          max_completion_tokens: 4096,
+          stream: true,
+        }),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(`OpenAI API error: ${response.status} ${response.statusText} - ${JSON.stringify(errorData)}`)
+      }
+
+      // Handle streaming response
+      const reader = response.body?.getReader()
+      const decoder = new TextDecoder()
+      let fullContent = ''
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          const chunk = decoder.decode(value, { stream: true })
+          const lines = chunk.split('\n').filter(line => line.trim() !== '')
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = line.slice(6)
+              if (data === '[DONE]') continue
+
+              try {
+                const parsed = JSON.parse(data)
+                const content = parsed.choices?.[0]?.delta?.content
+                if (content) {
+                  fullContent += content
+                }
+              } catch (e) {
+                // Skip invalid JSON chunks
+              }
+            }
+          }
+        }
+      }
+
+      return fullContent
+    } catch (error) {
+      console.error("[LLMHelper] Error calling OpenAI:", error)
+      throw new Error(`Failed to connect to OpenAI: ${error.message}`)
+    }
+  }
+
+  private async transcribeAudioWithWhisper(audioPath: string): Promise<string> {
+    try {
+      const FormData = (await import('form-data')).default
+      const formData = new FormData()
+      
+      // Read the audio file and append to form data as a stream
+      const audioStream = fs.createReadStream(audioPath)
+      formData.append('file', audioStream, {
+        filename: 'audio.mp3',
+        contentType: 'audio/mpeg',
+      })
+      formData.append('model', 'whisper-1')
+
+      // Use axios which handles form-data properly
+      const response = await axios.post(
+        'https://api.openai.com/v1/audio/transcriptions',
+        formData,
+        {
+          headers: {
+            'Authorization': `Bearer ${this.openaiApiKey}`,
+            ...formData.getHeaders(),
+          },
+        }
+      )
+
+      return response.data.text || ''
+    } catch (error: any) {
+      console.error("[LLMHelper] Error transcribing audio with Whisper:", error)
+      const errorMsg = error.response?.data ? JSON.stringify(error.response.data) : error.message
+      throw new Error(`Failed to transcribe audio: ${errorMsg}`)
+    }
+  }
+
+  private async transcribeAudioFromBase64WithWhisper(base64Data: string, mimeType: string): Promise<string> {
+    try {
+      // Write base64 data to a temporary file first
+      const tempFilePath = `/tmp/audio-${Date.now()}.mp3`
+      const audioBuffer = Buffer.from(base64Data, 'base64')
+      await fs.promises.writeFile(tempFilePath, audioBuffer)
+      
+      try {
+        // Use the file-based transcription method
+        const result = await this.transcribeAudioWithWhisper(tempFilePath)
+        return result
+      } finally {
+        // Clean up temp file
+        await fs.promises.unlink(tempFilePath).catch(() => {})
+      }
+    } catch (error: any) {
+      console.error("[LLMHelper] Error transcribing audio with Whisper:", error)
+      throw new Error(`Failed to transcribe audio: ${error.message}`)
     }
   }
 
@@ -153,12 +280,25 @@ export class LLMHelper {
   }
 }\nImportant: Return ONLY the JSON object, without any markdown formatting or code blocks.`
 
-    console.log("[LLMHelper] Calling Gemini LLM for solution...");
+    console.log("[LLMHelper] Calling LLM for solution...");
     try {
-      const result = await this.model.generateContent(prompt)
-      console.log("[LLMHelper] Gemini LLM returned result.");
-      const response = await result.response
-      const text = this.cleanJsonResponse(response.text())
+      let text: string
+      
+      if (this.useOpenAI) {
+        text = await this.callOpenAI([
+          { role: 'system', content: this.systemPrompt },
+          { role: 'user', content: prompt }
+        ])
+      } else if (this.useOllama) {
+        text = await this.callOllama(prompt)
+      } else {
+        const result = await this.model.generateContent(prompt)
+        const response = await result.response
+        text = response.text()
+      }
+      
+      console.log("[LLMHelper] LLM returned result.");
+      text = this.cleanJsonResponse(text)
       const parsed = JSON.parse(text)
       console.log("[LLMHelper] Parsed LLM response:", parsed)
       return parsed
@@ -196,18 +336,35 @@ export class LLMHelper {
 
   public async analyzeAudioFile(audioPath: string) {
     try {
-      const audioData = await fs.promises.readFile(audioPath);
-      const audioPart = {
-        inlineData: {
-          data: audioData.toString("base64"),
-          mimeType: "audio/mp3"
-        }
-      };
-      const prompt = `${this.systemPrompt}\n\nDescribe this audio clip in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the audio. Do not return a structured JSON object, just answer naturally as you would to a user.`;
-      const result = await this.model.generateContent([prompt, audioPart]);
-      const response = await result.response;
-      const text = response.text();
-      return { text, timestamp: Date.now() };
+      if (this.useOpenAI) {
+        // Use OpenAI Whisper to transcribe audio
+        console.log("[LLMHelper] Transcribing audio with Whisper API...")
+        const transcription = await this.transcribeAudioWithWhisper(audioPath)
+        
+        // Now analyze the transcription with ChatGPT
+        const analysisPrompt = `${this.systemPrompt}\n\nThe following is a transcription of an audio clip:\n\n"${transcription}"\n\nDescribe this content in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the content. Do not return a structured JSON object, just answer naturally as you would to a user.`
+        
+        const text = await this.callOpenAI([
+          { role: 'system', content: this.systemPrompt },
+          { role: 'user', content: analysisPrompt }
+        ])
+        
+        return { text, timestamp: Date.now() }
+      } else {
+        // Gemini supports audio directly
+        const audioData = await fs.promises.readFile(audioPath);
+        const audioPart = {
+          inlineData: {
+            data: audioData.toString("base64"),
+            mimeType: "audio/mp3"
+          }
+        };
+        const prompt = `${this.systemPrompt}\n\nDescribe this audio clip in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the audio. Do not return a structured JSON object, just answer naturally as you would to a user.`;
+        const result = await this.model.generateContent([prompt, audioPart]);
+        const response = await result.response;
+        const text = response.text();
+        return { text, timestamp: Date.now() };
+      }
     } catch (error) {
       console.error("Error analyzing audio file:", error);
       throw error;
@@ -216,17 +373,34 @@ export class LLMHelper {
 
   public async analyzeAudioFromBase64(data: string, mimeType: string) {
     try {
-      const audioPart = {
-        inlineData: {
-          data,
-          mimeType
-        }
-      };
-      const prompt = `${this.systemPrompt}\n\nDescribe this audio clip in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the audio. Do not return a structured JSON object, just answer naturally as you would to a user and be concise.`;
-      const result = await this.model.generateContent([prompt, audioPart]);
-      const response = await result.response;
-      const text = response.text();
-      return { text, timestamp: Date.now() };
+      if (this.useOpenAI) {
+        // Use OpenAI Whisper to transcribe audio from base64
+        console.log("[LLMHelper] Transcribing base64 audio with Whisper API...")
+        const transcription = await this.transcribeAudioFromBase64WithWhisper(data, mimeType)
+        
+        // Now analyze the transcription with ChatGPT
+        const analysisPrompt = `${this.systemPrompt}\n\nThe following is a transcription of an audio clip:\n\n"${transcription}"\n\nDescribe this content in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the content. Do not return a structured JSON object, just answer naturally as you would to a user and be concise.`
+        
+        const text = await this.callOpenAI([
+          { role: 'system', content: this.systemPrompt },
+          { role: 'user', content: analysisPrompt }
+        ])
+        
+        return { text, timestamp: Date.now() }
+      } else {
+        // Gemini supports audio
+        const audioPart = {
+          inlineData: {
+            data,
+            mimeType
+          }
+        };
+        const prompt = `${this.systemPrompt}\n\nDescribe this audio clip in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the audio. Do not return a structured JSON object, just answer naturally as you would to a user and be concise.`;
+        const result = await this.model.generateContent([prompt, audioPart]);
+        const response = await result.response;
+        const text = response.text();
+        return { text, timestamp: Date.now() };
+      }
     } catch (error) {
       console.error("Error analyzing audio from base64:", error);
       throw error;
@@ -235,18 +409,37 @@ export class LLMHelper {
 
   public async analyzeImageFile(imagePath: string) {
     try {
-      const imageData = await fs.promises.readFile(imagePath);
-      const imagePart = {
-        inlineData: {
-          data: imageData.toString("base64"),
-          mimeType: "image/png"
-        }
-      };
-      const prompt = `${this.systemPrompt}\n\nDescribe the content of this image in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the image. Do not return a structured JSON object, just answer naturally as you would to a user. Be concise and brief.`;
-      const result = await this.model.generateContent([prompt, imagePart]);
-      const response = await result.response;
-      const text = response.text();
-      return { text, timestamp: Date.now() };
+      if (this.useOpenAI) {
+        // OpenAI vision API
+        const imageData = await fs.promises.readFile(imagePath);
+        const base64Image = imageData.toString("base64");
+        
+        const text = await this.callOpenAI([
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: `${this.systemPrompt}\n\nDescribe the content of this image in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the image. Do not return a structured JSON object, just answer naturally as you would to a user. Be concise and brief.` },
+              { type: 'image_url', image_url: { url: `data:image/png;base64,${base64Image}` } }
+            ]
+          }
+        ])
+        
+        return { text, timestamp: Date.now() };
+      } else {
+        // Gemini or Ollama (Gemini only for now since Ollama doesn't support vision well)
+        const imageData = await fs.promises.readFile(imagePath);
+        const imagePart = {
+          inlineData: {
+            data: imageData.toString("base64"),
+            mimeType: "image/png"
+          }
+        };
+        const prompt = `${this.systemPrompt}\n\nDescribe the content of this image in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the image. Do not return a structured JSON object, just answer naturally as you would to a user. Be concise and brief.`;
+        const result = await this.model.generateContent([prompt, imagePart]);
+        const response = await result.response;
+        const text = response.text();
+        return { text, timestamp: Date.now() };
+      }
     } catch (error) {
       console.error("Error analyzing image file:", error);
       throw error;
@@ -255,7 +448,12 @@ export class LLMHelper {
 
   public async chatWithGemini(message: string): Promise<string> {
     try {
-      if (this.useOllama) {
+      if (this.useOpenAI) {
+        return this.callOpenAI([
+          { role: 'system', content: this.systemPrompt },
+          { role: 'user', content: message }
+        ]);
+      } else if (this.useOllama) {
         return this.callOllama(message);
       } else if (this.model) {
         const result = await this.model.generateContent(message);
@@ -278,6 +476,10 @@ export class LLMHelper {
     return this.useOllama;
   }
 
+  public isUsingOpenAI(): boolean {
+    return this.useOpenAI;
+  }
+
   public async getOllamaModels(): Promise<string[]> {
     if (!this.useOllama) return [];
     
@@ -293,11 +495,13 @@ export class LLMHelper {
     }
   }
 
-  public getCurrentProvider(): "ollama" | "gemini" {
+  public getCurrentProvider(): "ollama" | "gemini" | "openai" {
+    if (this.useOpenAI) return "openai";
     return this.useOllama ? "ollama" : "gemini";
   }
 
   public getCurrentModel(): string {
+    if (this.useOpenAI) return this.openaiModel;
     return this.useOllama ? this.ollamaModel : "gemini-2.0-flash";
   }
 
@@ -326,12 +530,31 @@ export class LLMHelper {
     }
     
     this.useOllama = false;
+    this.useOpenAI = false;
     console.log("[LLMHelper] Switched to Gemini");
+  }
+
+  public async switchToOpenAI(apiKey: string, model?: string): Promise<void> {
+    this.openaiApiKey = apiKey;
+    this.openaiModel = model || "gpt-4o";
+    this.useOpenAI = true;
+    this.useOllama = false;
+    console.log(`[LLMHelper] Switched to OpenAI: ${this.openaiModel}`);
   }
 
   public async testConnection(): Promise<{ success: boolean; error?: string }> {
     try {
-      if (this.useOllama) {
+      if (this.useOpenAI) {
+        // Test OpenAI with a simple prompt
+        const result = await this.callOpenAI([
+          { role: 'user', content: 'Hello' }
+        ]);
+        if (result) {
+          return { success: true };
+        } else {
+          return { success: false, error: "Empty response from OpenAI" };
+        }
+      } else if (this.useOllama) {
         const available = await this.checkOllamaAvailable();
         if (!available) {
           return { success: false, error: `Ollama not available at ${this.ollamaUrl}` };

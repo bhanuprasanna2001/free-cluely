@@ -145,7 +145,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       return {
         provider: llmHelper.getCurrentProvider(),
         model: llmHelper.getCurrentModel(),
-        isOllama: llmHelper.isUsingOllama()
+        isOllama: llmHelper.isUsingOllama(),
+        isOpenAI: llmHelper.isUsingOpenAI()
       };
     } catch (error: any) {
       console.error("Error getting current LLM config:", error);
@@ -182,6 +183,17 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { success: true };
     } catch (error: any) {
       console.error("Error switching to Gemini:", error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle("switch-to-openai", async (_, apiKey: string, model?: string) => {
+    try {
+      const llmHelper = appState.processingHelper.getLLMHelper();
+      await llmHelper.switchToOpenAI(apiKey, model);
+      return { success: true };
+    } catch (error: any) {
+      console.error("Error switching to OpenAI:", error);
       return { success: false, error: error.message };
     }
   });
