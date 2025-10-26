@@ -470,14 +470,14 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
         )
       }),
       // Streaming event listeners
-      window.electronAPI.onAudioStreamChunk((chunk: string) => {
+      (window.electronAPI as any).onAudioStreamChunk?.((chunk: string) => {
         console.log('[Solutions] Received streaming chunk:', chunk)
         setStreamingText(prev => prev + chunk)
-      }),
-      window.electronAPI.onAudioStreamComplete(() => {
+      }) || (() => {}),
+      (window.electronAPI as any).onAudioStreamComplete?.(() => {
         console.log('[Solutions] Streaming complete')
         setIsStreaming(false)
-      })
+      }) || (() => {})
     ]
 
     return () => {
