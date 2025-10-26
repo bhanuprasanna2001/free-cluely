@@ -70,10 +70,23 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   })
 
-  // IPC handler for analyzing audio from base64 data
+  // IPC handler for analyzing audio from base64 data with streaming
   ipcMain.handle("analyze-audio-base64", async (event, data: string, mimeType: string) => {
     try {
-      const result = await appState.processingHelper.processAudioBase64(data, mimeType)
+      const mainWindow = appState.getMainWindow()
+      
+      // Create streaming callback that sends chunks to renderer
+      const onStreamChunk = mainWindow ? (chunk: string) => {
+        mainWindow.webContents.send("audio-stream-chunk", chunk)
+      } : undefined
+      
+      const result = await appState.processingHelper.processAudioBase64(data, mimeType, onStreamChunk)
+      
+      // Send final completion event
+      if (mainWindow) {
+        mainWindow.webContents.send("audio-stream-complete")
+      }
+      
       return result
     } catch (error: any) {
       console.error("Error in analyze-audio-base64 handler:", error)

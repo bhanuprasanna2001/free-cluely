@@ -1,6 +1,15 @@
 import { GoogleGenerativeAI, GenerativeModel } from "@google/generative-ai"
 import fs from "fs"
 import axios from "axios"
+import { Kontext } from "@kontext.dev/kontext-sdk"
+import https from "https"
+
+// Disable SSL verification for staging API (ONLY FOR TESTING)
+// This is needed because staging-api.kontext.dev has SSL certificate issues
+if (process.env.KONTEXT_API_URL?.includes('staging')) {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+  console.log('[LLMHelper] SSL verification disabled for staging API')
+}
 
 interface OllamaResponse {
   response: string
@@ -9,9 +18,10 @@ interface OllamaResponse {
 
 export class LLMHelper {
   private model: GenerativeModel | null = null
-private readonly systemPrompt = `You are a Procurement Negotiation Assistant specializing in buyer-side negotiations. You are familiar with Kearney's Purchasing Chessboard, BATNA/ZOPA, and procurement playbooks like "Getting to Yes."
-Your mission: Provide fast, data-driven, and actionable support for supply-chain, procurement, sourcing, supplier negotiation, contracts, logistics, and TCO. If asked anything outside these topics, respond: "I can only assist with procurement or supply-chain related questions."
-Be concise, evidence-driven, and operational.`
+private readonly systemPrompt = `Procurement Negotiation Assistant. Expert in supplier negotiations, contracts, pricing, TCO.
+Focus: Fast, data-driven, tactical advice.
+Format: Concise bullet points. One-line actions.
+Scope: Procurement/supply-chain ONLY.`
   private useOllama: boolean = false
   private useOpenAI: boolean = false
   private ollamaModel: string = "llama3.2"
@@ -94,7 +104,7 @@ Be concise, evidence-driven, and operational.`
     }
   }
 
-  private async callOpenAI(messages: Array<{role: string, content: string | Array<any>}>): Promise<string> {
+  private async callOpenAI(messages: Array<{role: string, content: string | Array<any>}>, onChunk?: (chunk: string) => void): Promise<string> {
     try {
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -139,6 +149,10 @@ Be concise, evidence-driven, and operational.`
                 const content = parsed.choices?.[0]?.delta?.content
                 if (content) {
                   fullContent += content
+                  // Call the callback with the chunk if provided
+                  if (onChunk) {
+                    onChunk(content)
+                  }
                 }
               } catch (e) {
                 // Skip invalid JSON chunks
@@ -420,6 +434,137 @@ Be concise, evidence-driven, and operational.`
     }
   }
 
+  /**
+   * Fetch relevant context from Kontext.dev using SDK
+   */
+  private async fetchKontextContext(transcription: string): Promise<string> {
+    try {
+      const kontextApiKey = process.env.KONTEXT_API_KEY
+      let kontextApiUrl = process.env.KONTEXT_API_URL || 'https://api.kontext.dev'
+      const kontextUserId = 'd7d3cb73-edf1-46c8-84c4-72703585fdd5'
+
+      if (!kontextApiKey) {
+        console.warn('[LLMHelper] Kontext API key not configured, skipping context retrieval')
+        return ''
+      }
+
+      // Remove trailing slash from URL if present (critical for SDK)
+      kontextApiUrl = kontextApiUrl.replace(/\/$/, '')
+
+      console.log('[LLMHelper] Querying Kontext vault via SDK...')
+      console.log('[LLMHelper] API URL:', kontextApiUrl)
+      console.log('[LLMHelper] User ID:', kontextUserId)
+      
+      // Initialize Kontext SDK
+      const kontextConfig: any = {
+        apiKey: kontextApiKey,
+        userId: kontextUserId
+      }
+      
+      // Add custom API URL if specified
+      if (kontextApiUrl && kontextApiUrl !== 'https://api.kontext.dev') {
+        kontextConfig.apiUrl = kontextApiUrl
+      }
+      
+      const kontext = new Kontext(kontextConfig)
+
+      // Query the vault with enhanced parameters for better retrieval
+      const vaultResult = await kontext.vault.query({
+        userId: kontextUserId,
+        query: transcription,
+        includeAnswer: true,
+        topK: 5, // Get top 5 most relevant documents
+      })
+
+      console.log('[LLMHelper] Kontext vault query completed')
+      console.log('[LLMHelper] Documents found:', vaultResult.hits?.length || 0)
+
+      // Extract context from vault results
+      let context = ''
+      
+      // Include the AI-generated answer if available
+      if (vaultResult.answer?.text) {
+        context = `AI Answer: ${vaultResult.answer.text}\n\n`
+        console.log('[LLMHelper] AI Answer included in context')
+      }
+      
+      // Add retrieved documents
+      if (vaultResult.hits && vaultResult.hits.length > 0) {
+        console.log(`[LLMHelper] Found ${vaultResult.hits.length} relevant documents from Kontext`)
+        
+        const documentTexts = vaultResult.hits
+          .map((hit: any, idx: number) => {
+            const parts = []
+            parts.push(`[Document ${idx + 1}]`)
+            
+            // Extract text from various possible attributes
+            const text = hit.attributes?.text || 
+                        hit.attributes?.content || 
+                        hit.attributes?.snippet ||
+                        JSON.stringify(hit.attributes)
+            
+            if (hit.attributes?.fileName) {
+              parts.push(`Source: ${hit.attributes.fileName}`)
+            }
+            
+            if (hit.score) {
+              parts.push(`Relevance: ${(hit.score * 100).toFixed(1)}%`)
+            }
+            
+            parts.push(`Content: ${text}`)
+            
+            return parts.join('\n')
+          })
+          .filter(Boolean)
+          .join('\n\n')
+        
+        context += documentTexts
+      } else {
+        console.log('[LLMHelper] No documents found in Kontext vault')
+      }
+
+      if (context) {
+        console.log('[LLMHelper] Retrieved context from Kontext (preview):', context.substring(0, 200) + '...')
+      }
+
+      return context
+    } catch (error: any) {
+      console.error('[LLMHelper] Error fetching context from Kontext:', error.message)
+      
+      if (error.cause) {
+        console.error('[LLMHelper] Error cause:', error.cause)
+      }
+      
+      if (error.response) {
+        console.error('[LLMHelper] Kontext error response:', JSON.stringify(error.response?.data, null, 2))
+      }
+      
+      // Provide helpful troubleshooting info
+      if (error.code === 'TOKEN_ISSUE_FAILED' || error.statusCode === 401) {
+        console.error('[LLMHelper] Authentication failed - check KONTEXT_API_KEY')
+      } else if (error.message?.includes('certificate') || error.code === 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY') {
+        console.error('[LLMHelper] SSL certificate error - make sure NODE_TLS_REJECT_UNAUTHORIZED is set for staging')
+      }
+      
+      return ''
+    }
+  }
+
+  /**
+   * Fetch context based on environment configuration (Weaviate or Kontext)
+   */
+  private async fetchContext(transcription: string): Promise<string> {
+    const useKontext = process.env.USE_KONTEXT === 'true'
+    
+    if (useKontext) {
+      console.log('[LLMHelper] Using Kontext for context retrieval')
+      return this.fetchKontextContext(transcription)
+    } else {
+      console.log('[LLMHelper] Using Weaviate for context retrieval')
+      return this.fetchWeaviateContext(transcription)
+    }
+  }
+
   public async analyzeAudioFile(audioPath: string) {
     try {
       if (this.useOpenAI) {
@@ -428,21 +573,21 @@ Be concise, evidence-driven, and operational.`
         const transcription = await this.transcribeAudioWithWhisper(audioPath)
         console.log("[LLMHelper] Transcription:", transcription)
         
-        // Fetch context from Weaviate
-        console.log("[LLMHelper] Fetching context from Weaviate...")
-        const context = await this.fetchWeaviateContext(transcription)
+        // Fetch context from Weaviate or Kontext based on env config
+        console.log("[LLMHelper] Fetching context...")
+        const context = await this.fetchContext(transcription)
         
         // Build prompt with context if available
-        let userPrompt = `The following is a transcription of an audio clip:\n\n"${transcription}"\n\n`
+        let userPrompt = `Audio: "${transcription}"\n\n`
         
         if (context && context.trim().length > 0) {
-          userPrompt += `\n**Relevant Context from Knowledge Base:**\n${context}\n\n`
-          console.log("[LLMHelper] Using Weaviate context in prompt")
+          userPrompt += `Context:\n${context}\n\n`
+          console.log("[LLMHelper] Using context in prompt")
         } else {
-          console.log("[LLMHelper] No Weaviate context available")
+          console.log("[LLMHelper] No context available")
         }
         
-        userPrompt += `Describe this content in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the content. Do not return a structured JSON object, just answer naturally as you would to a user.`
+        userPrompt += `Negotiate with this supplier. Short answer with next actions.`
         
         const text = await this.callOpenAI([
           { role: 'system', content: this.systemPrompt },
@@ -459,7 +604,7 @@ Be concise, evidence-driven, and operational.`
             mimeType: "audio/mp3"
           }
         };
-        const prompt = `${this.systemPrompt}\n\nDescribe this audio clip in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the audio. Do not return a structured JSON object, just answer naturally as you would to a user.`;
+        const prompt = `${this.systemPrompt}\n\nAudio clip analysis. Short answer with suggested next actions.`;
         const result = await this.model.generateContent([prompt, audioPart]);
         const response = await result.response;
         const text = response.text();
@@ -471,7 +616,7 @@ Be concise, evidence-driven, and operational.`
     }
   }
 
-  public async analyzeAudioFromBase64(data: string, mimeType: string) {
+  public async analyzeAudioFromBase64(data: string, mimeType: string, onStreamChunk?: (chunk: string) => void) {
     try {
       if (this.useOpenAI) {
         // Use OpenAI Whisper to transcribe audio from base64
@@ -479,26 +624,45 @@ Be concise, evidence-driven, and operational.`
         const transcription = await this.transcribeAudioFromBase64WithWhisper(data, mimeType)
         console.log("[LLMHelper] Transcription:", transcription)
         
-        // Fetch context from Weaviate
-        console.log("[LLMHelper] Fetching context from Weaviate...")
-        const context = await this.fetchWeaviateContext(transcription)
+        // Fetch context from Weaviate or Kontext based on env config
+        console.log("[LLMHelper] Fetching context...")
+        const context = await this.fetchContext(transcription)
         
         // Build prompt with context if available
         let userPrompt = `The following is a transcription of an audio clip:\n\n"${transcription}"\n\n`
         
         if (context && context.trim().length > 0) {
-          userPrompt += `\n**Relevant Context from Knowledge Base:**\n${context}\n\n`
-          console.log("[LLMHelper] Using Weaviate context in prompt")
+          userPrompt += `**Relevant Context from Knowledge Base:**\n${context}\n\n`
+          console.log("[LLMHelper] Using context in prompt")
         } else {
-          console.log("[LLMHelper] No Weaviate context available")
+          console.log("[LLMHelper] No context available")
         }
         
-        userPrompt += `Describe this content in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the content. Do not return a structured JSON object, just answer naturally as you would to a user and be concise.`
+        userPrompt += `Provide negotiation strategy. Use plain text only, NO markdown, NO ## headers, NO ** bold:
+
+LEVERAGE POINTS:
+- [Key advantage] - one line why
+- [Key advantage] - one line why
+
+NEXT ACTIONS:
+1. [Tactical move] - one line reason
+2. [Tactical move] - one line reason
+
+Use data from context. Be concise. Plain text only.`
+        
+        console.log("[LLMHelper] Starting streaming response...")
         
         const text = await this.callOpenAI([
           { role: 'system', content: this.systemPrompt },
           { role: 'user', content: userPrompt }
-        ])
+        ], onStreamChunk)
+        
+        console.log("[LLMHelper] OpenAI response received")
+        console.log("[LLMHelper] Response type:", typeof text)
+        console.log("[LLMHelper] Response length:", text?.length)
+        console.log("[LLMHelper] Response preview:", text?.substring(0, 300))
+        console.log("[LLMHelper] Contains markdown headers:", text?.includes('##'))
+        console.log("[LLMHelper] Contains bullets:", text?.includes('-'))
         
         return { text, timestamp: Date.now() }
       } else {
@@ -509,7 +673,15 @@ Be concise, evidence-driven, and operational.`
             mimeType
           }
         };
-        const prompt = `${this.systemPrompt}\n\nDescribe this audio clip in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the audio. Do not return a structured JSON object, just answer naturally as you would to a user and be concise.`;
+        const prompt = `${this.systemPrompt}\n\nProvide strategy. Plain text only, NO markdown:
+
+LEVERAGE:
+- Key advantage - one line
+
+NEXT MOVE:
+1. Tactical action - one line
+
+Short, data-driven. Plain text.`;
         const result = await this.model.generateContent([prompt, audioPart]);
         const response = await result.response;
         const text = response.text();
@@ -532,7 +704,7 @@ Be concise, evidence-driven, and operational.`
           {
             role: 'user',
             content: [
-              { type: 'text', text: `${this.systemPrompt}\n\nDescribe the content of this image in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the image. Do not return a structured JSON object, just answer naturally as you would to a user. Be concise and brief.` },
+              { type: 'text', text: `${this.systemPrompt}\n\nImage analysis. Short answer with next actions.` },
               { type: 'image_url', image_url: { url: `data:image/png;base64,${base64Image}` } }
             ]
           }
@@ -548,7 +720,7 @@ Be concise, evidence-driven, and operational.`
             mimeType: "image/png"
           }
         };
-        const prompt = `${this.systemPrompt}\n\nDescribe the content of this image in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the image. Do not return a structured JSON object, just answer naturally as you would to a user. Be concise and brief.`;
+        const prompt = `${this.systemPrompt}\n\nImage analysis. Short answer with next actions.`;
         const result = await this.model.generateContent([prompt, imagePart]);
         const response = await result.response;
         const text = response.text();
@@ -562,15 +734,25 @@ Be concise, evidence-driven, and operational.`
 
   public async chatWithGemini(message: string): Promise<string> {
     try {
+      // Add instruction for plain text output with 3 negotiation points
+      const formattedMessage = `${message}
+
+Respond in plain text, NO markdown. Provide 3 key negotiation points:
+1. [Point] - one line
+2. [Point] - one line  
+3. [Point] - one line
+
+Keep it concise and tactical.`
+
       if (this.useOpenAI) {
         return this.callOpenAI([
           { role: 'system', content: this.systemPrompt },
-          { role: 'user', content: message }
+          { role: 'user', content: formattedMessage }
         ]);
       } else if (this.useOllama) {
-        return this.callOllama(message);
+        return this.callOllama(formattedMessage);
       } else if (this.model) {
-        const result = await this.model.generateContent(message);
+        const result = await this.model.generateContent(formattedMessage);
         const response = await result.response;
         return response.text();
       } else {

@@ -15,6 +15,8 @@ export interface ElectronAPI {
   onProcessingNoScreenshots: (callback: () => void) => () => void
   onProblemExtracted: (callback: (data: any) => void) => () => void
   onSolutionSuccess: (callback: (data: any) => void) => () => void
+  onAudioStreamChunk: (callback: (chunk: string) => void) => () => void
+  onAudioStreamComplete: (callback: () => void) => () => void
   onUnauthorized: (callback: () => void) => () => void
   onDebugError: (callback: (error: string) => void) => () => void
   takeScreenshot: () => Promise<void>

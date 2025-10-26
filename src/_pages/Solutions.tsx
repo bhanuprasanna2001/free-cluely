@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef } from "react"
 import { useQuery, useQueryClient } from "react-query"
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter"
 import { dracula } from "react-syntax-highlighter/dist/esm/styles/prism"
+import ReactMarkdown from "react-markdown"
 
 import ScreenshotQueue from "../components/Queue/ScreenshotQueue"
 import {
@@ -27,24 +28,106 @@ export const ContentSection = ({
   title: string
   content: React.ReactNode
   isLoading: boolean
-}) => (
-  <div className="space-y-2">
-    <h2 className="text-[13px] font-medium text-white tracking-wide">
-      {title}
-    </h2>
-    {isLoading ? (
-      <div className="mt-4 flex">
-        <p className="text-xs bg-gradient-to-r from-gray-300 via-gray-100 to-gray-300 bg-clip-text text-transparent animate-pulse">
-          Extracting problem statement...
-        </p>
-      </div>
-    ) : (
-      <div className="text-[13px] leading-[1.4] text-gray-100 max-w-[600px]">
-        {content}
-      </div>
-    )}
-  </div>
-)
+}) => {
+  // Force convert content to string for markdown rendering
+  const contentString = typeof content === 'string' ? content : String(content || '');
+  const isStringContent = typeof content === 'string' && content.length > 0;
+  
+  console.log('[ContentSection] title:', title);
+  console.log('[ContentSection] content type:', typeof content);
+  console.log('[ContentSection] isStringContent:', isStringContent);
+  console.log('[ContentSection] contentString length:', contentString.length);
+  console.log('[ContentSection] contentString preview:', contentString.substring(0, 100));
+  
+  return (
+    <div className="space-y-2">
+      <h2 className="text-[13px] font-medium text-white tracking-wide">
+        {title}
+      </h2>
+      {isLoading ? (
+        <div className="mt-4 flex">
+          <p className="text-xs bg-gradient-to-r from-gray-300 via-gray-100 to-gray-300 bg-clip-text text-transparent animate-pulse">
+            Extracting problem statement...
+          </p>
+        </div>
+      ) : (
+        <div className="text-[13px] leading-[1.7] text-gray-100 max-w-[700px]">
+          {isStringContent ? (
+            <>
+              {console.log('[ContentSection] Rendering with ReactMarkdown')}
+              <ReactMarkdown
+                components={{
+                  h1: ({node, ...props}) => <h1 className="text-xl font-bold text-blue-400 mb-4 mt-5" {...props} />,
+                  h2: ({node, children, ...props}) => {
+                    // Color code different sections
+                    const text = children?.toString() || '';
+                    let colorClass = 'text-emerald-400';
+                    
+                    if (text.includes('Recommended') || text.includes('Strategy') || text.includes('🎯')) {
+                      colorClass = 'text-red-400'; // Red for negotiation recommendations
+                    } else if (text.includes('Leverage') || text.includes('💡')) {
+                      colorClass = 'text-yellow-400'; // Yellow for leverage points
+                    } else if (text.includes('Summary') || text.includes('📊')) {
+                      colorClass = 'text-blue-400'; // Blue for summary
+                    }
+                    
+                    return <h2 className={`text-base font-bold ${colorClass} mb-3 mt-4 border-b border-gray-700 pb-2`} {...props}>{children}</h2>;
+                  },
+                  h3: ({node, ...props}) => <h3 className="text-sm font-semibold text-purple-400 mb-2 mt-3" {...props} />,
+                  p: ({node, ...props}) => <p className="mb-3 text-gray-200 leading-relaxed" {...props} />,
+                  ul: ({node, ...props}) => <ul className="space-y-2 mb-4 ml-1" {...props} />,
+                  ol: ({node, ...props}) => <ol className="space-y-3 mb-4 ml-1" {...props} />,
+                  li: ({node, children, ...props}) => {
+                    const text = children?.toString() || '';
+                    // Check if this is under a "Recommended" section (numbered list = recommendations)
+                    const isRecommendation = props.className?.includes('ordered');
+                    
+                    return (
+                      <li className="flex items-start gap-3 text-gray-100">
+                        <span className={`${isRecommendation ? 'text-red-400 font-bold text-base' : 'text-blue-400 text-base'} mt-0.5`}>
+                          {isRecommendation ? '▶' : '•'}
+                        </span>
+                        <span className="flex-1" {...props}>{children}</span>
+                      </li>
+                    );
+                  },
+                  strong: ({node, children, ...props}) => {
+                    const text = children?.toString() || '';
+                    // Make negotiation tactics extra prominent
+                    const isInRecommendation = text.length > 10; // Longer bold text is likely a tactic name
+                    return (
+                      <strong className={`font-bold ${isInRecommendation ? 'text-red-300' : 'text-white'}`} {...props}>
+                        {children}
+                      </strong>
+                    );
+                  },
+                  em: ({node, ...props}) => <em className="italic text-gray-300" {...props} />,
+                  code: ({node, inline, ...props}: any) => 
+                    inline ? (
+                      <code className="bg-gray-700/50 text-emerald-300 px-1.5 py-0.5 rounded text-xs font-mono" {...props} />
+                    ) : (
+                      <code className="block bg-gray-800/50 text-emerald-300 p-3 rounded text-xs overflow-x-auto font-mono my-2" {...props} />
+                    ),
+                  blockquote: ({node, ...props}) => (
+                    <blockquote className="border-l-4 border-yellow-400 bg-yellow-900/10 pl-4 py-2 italic text-gray-300 my-3" {...props} />
+                  ),
+                  hr: ({node, ...props}) => <hr className="border-gray-600 my-4" {...props} />,
+                }}
+              >
+                {contentString}
+              </ReactMarkdown>
+            </>
+          ) : (
+            <>
+              {console.log('[ContentSection] Rendering as plain ReactNode')}
+              {content}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 const SolutionSection = ({
   title,
   content,
@@ -134,6 +217,8 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
   // Audio recording state
   const [audioRecording, setAudioRecording] = useState(false)
   const [audioResult, setAudioResult] = useState<AudioResult | null>(null)
+  const [streamingText, setStreamingText] = useState<string>("")
+  const [isStreaming, setIsStreaming] = useState(false)
 
   const [debugProcessing, setDebugProcessing] = useState(false)
   const [problemStatementData, setProblemStatementData] =
@@ -254,6 +339,8 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
         setSpaceComplexityData(null)
         setCustomContent(null)
         setAudioResult(null)
+        setStreamingText("")
+        setIsStreaming(false)
 
         // Start audio recording from user's microphone
         try {
@@ -271,17 +358,26 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
             const reader = new FileReader()
             reader.onloadend = async () => {
               const base64Data = (reader.result as string).split(',')[1]
-              // Send audio to Gemini for analysis
+              // Send audio to backend for analysis
               try {
+                console.log('[Solutions] Sending audio to backend for analysis...')
+                setIsStreaming(true)
+                setStreamingText("")
+                
                 const result = await window.electronAPI.analyzeAudioFromBase64(
                   base64Data,
                   blob.type
                 )
+                console.log('[Solutions] Received result from backend:', result)
+                console.log('[Solutions] Result text type:', typeof result.text)
+                console.log('[Solutions] Result text length:', result.text?.length)
+                console.log('[Solutions] Result text preview:', result.text?.substring(0, 200))
                 // Store result in react-query cache
                 queryClient.setQueryData(["audio_result"], result)
                 setAudioResult(result)
               } catch (err) {
                 console.error('Audio analysis failed:', err)
+                setIsStreaming(false)
               }
             }
             reader.readAsDataURL(blob)
@@ -372,6 +468,15 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
           "There are no extra screenshots to process.",
           "neutral"
         )
+      }),
+      // Streaming event listeners
+      window.electronAPI.onAudioStreamChunk((chunk: string) => {
+        console.log('[Solutions] Received streaming chunk:', chunk)
+        setStreamingText(prev => prev + chunk)
+      }),
+      window.electronAPI.onAudioStreamComplete(() => {
+        console.log('[Solutions] Streaming complete')
+        setIsStreaming(false)
       })
     ]
 
@@ -395,6 +500,9 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
         // If this is from audio processing, show it in the custom content section
         const audioResult = queryClient.getQueryData(["audio_result"]) as AudioResult | undefined;
         if (audioResult) {
+          console.log('[Solutions] Processing audio result:', audioResult)
+          console.log('[Solutions] Audio result text type:', typeof audioResult.text)
+          console.log('[Solutions] Audio result text:', audioResult.text)
           // Update all relevant sections when audio result is received
           setProblemStatementData({
             problem_statement: audioResult.text,
@@ -415,6 +523,7 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
             validation_type: "manual",
             difficulty: "custom"
           });
+          console.log('[Solutions] Set problemStatementData with text:', audioResult.text)
           setSolutionData(null); // Reset solution to trigger loading state
           setThoughtsData(null);
           setTimeComplexityData(null);
@@ -501,8 +610,8 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
                     {/* Problem Statement Section - Only for non-manual */}
                     <ContentSection
                       title={problemStatementData?.output_format?.subtype === "voice" ? "Voice Input" : "Problem Statement"}
-                      content={problemStatementData?.problem_statement}
-                      isLoading={!problemStatementData}
+                      content={isStreaming ? streamingText : problemStatementData?.problem_statement}
+                      isLoading={!problemStatementData && !isStreaming}
                     />
                     {/* Show loading state when waiting for solution */}
                     {problemStatementData && !solutionData && (

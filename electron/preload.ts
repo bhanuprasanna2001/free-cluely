@@ -22,6 +22,8 @@ interface ElectronAPI {
   onProcessingNoScreenshots: (callback: () => void) => () => void
   onProblemExtracted: (callback: (data: any) => void) => () => void
   onSolutionSuccess: (callback: (data: any) => void) => () => void
+  onAudioStreamChunk: (callback: (chunk: string) => void) => () => void
+  onAudioStreamComplete: (callback: () => void) => () => void
 
   onUnauthorized: (callback: () => void) => () => void
   onDebugError: (callback: (error: string) => void) => () => void
@@ -169,6 +171,20 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on(PROCESSING_EVENTS.UNAUTHORIZED, subscription)
     return () => {
       ipcRenderer.removeListener(PROCESSING_EVENTS.UNAUTHORIZED, subscription)
+    }
+  },
+  onAudioStreamChunk: (callback: (chunk: string) => void) => {
+    const subscription = (_: any, chunk: string) => callback(chunk)
+    ipcRenderer.on("audio-stream-chunk", subscription)
+    return () => {
+      ipcRenderer.removeListener("audio-stream-chunk", subscription)
+    }
+  },
+  onAudioStreamComplete: (callback: () => void) => {
+    const subscription = () => callback()
+    ipcRenderer.on("audio-stream-complete", subscription)
+    return () => {
+      ipcRenderer.removeListener("audio-stream-complete", subscription)
     }
   },
   moveWindowLeft: () => ipcRenderer.invoke("move-window-left"),
