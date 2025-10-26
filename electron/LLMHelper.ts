@@ -9,7 +9,9 @@ interface OllamaResponse {
 
 export class LLMHelper {
   private model: GenerativeModel | null = null
-  private readonly systemPrompt = `You are Wingman AI, a helpful, proactive assistant for any kind of problem or situation (not just coding). For any user input, analyze the situation, provide a clear problem statement, relevant context, and suggest several possible responses or actions the user could take next. Always explain your reasoning. Present your suggestions as a list of options or next steps.`
+private readonly systemPrompt = `You are a Procurement Negotiation Assistant specializing in buyer-side negotiations. You are familiar with Kearney's Purchasing Chessboard, BATNA/ZOPA, and procurement playbooks like "Getting to Yes."
+Your mission: Provide fast, data-driven, and actionable support for supply-chain, procurement, sourcing, supplier negotiation, contracts, logistics, and TCO. If asked anything outside these topics, respond: "I can only assist with procurement or supply-chain related questions."
+Be concise, evidence-driven, and operational.`
   private useOllama: boolean = false
   private useOpenAI: boolean = false
   private ollamaModel: string = "llama3.2"
@@ -334,19 +336,117 @@ export class LLMHelper {
     }
   }
 
+  private async fetchWeaviateContext(transcription: string): Promise<string> {
+    try {
+      const weaviateURL = process.env.WEAVIATE_URL
+      const weaviateApiKey = process.env.WEAVIATE_API_KEY
+
+      if (!weaviateURL || !weaviateApiKey) {
+        console.warn('[LLMHelper] Weaviate credentials not configured, skipping context retrieval')
+        return ''
+      }
+
+      const collectionName = process.env.WEAVIATE_COLLECTION || 'ProcurementContext'
+      const contentField = process.env.WEAVIATE_CONTENT_FIELD || 'summary'
+
+      // Use GraphQL API to query Weaviate with semantic search
+      const response = await axios.post(
+        `${weaviateURL}/v1/graphql`,
+        {
+          query: `
+            {
+              Get {
+                ${collectionName}(
+                  nearText: {
+                    concepts: ["${transcription.replace(/"/g, '\\"')}"]
+                  }
+                  limit: 5
+                ) {
+                  ${contentField}
+                  name
+                  category
+                  supplierId
+                  annualSpend
+                  _additional {
+                    distance
+                  }
+                }
+              }
+            }
+          `
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${weaviateApiKey}`,
+            'Content-Type': 'application/json',
+            'X-Weaviate-Cluster-Url': weaviateURL
+          }
+        }
+      )
+
+      console.log("[LLMHelper] Weaviate response:", JSON.stringify(response.data, null, 2))
+
+      // Extract context from results
+      let context = ''
+      const results = response.data?.data?.Get?.[collectionName]
+      if (results && results.length > 0) {
+        console.log(`[LLMHelper] Found ${results.length} relevant context items from Weaviate`)
+        context = results
+          .map((obj: any, idx: number) => {
+            const parts = []
+            parts.push(`[Result ${idx + 1} - Distance: ${obj._additional?.distance?.toFixed(4)}]`)
+            if (obj.name) parts.push(`Supplier: ${obj.name}`)
+            if (obj.category) parts.push(`Category: ${obj.category}`)
+            if (obj.supplierId) parts.push(`ID: ${obj.supplierId}`)
+            if (obj.annualSpend) parts.push(`Annual Spend: $${obj.annualSpend}`)
+            if (obj[contentField]) parts.push(`Details: ${obj[contentField]}`)
+            return parts.join('\n')
+          })
+          .filter(Boolean)
+          .join('\n\n')
+      } else {
+        console.log('[LLMHelper] No context found in Weaviate')
+      }
+
+      console.log("[LLMHelper] Retrieved context from Weaviate:", context)
+
+      return context
+    } catch (error) {
+      console.error("[LLMHelper] Error fetching context from Weaviate:", error)
+      if (error.response) {
+        console.error("[LLMHelper] Weaviate error response:", JSON.stringify(error.response.data, null, 2))
+      }
+      return ''
+    }
+  }
+
   public async analyzeAudioFile(audioPath: string) {
     try {
       if (this.useOpenAI) {
         // Use OpenAI Whisper to transcribe audio
         console.log("[LLMHelper] Transcribing audio with Whisper API...")
         const transcription = await this.transcribeAudioWithWhisper(audioPath)
+        console.log("[LLMHelper] Transcription:", transcription)
         
-        // Now analyze the transcription with ChatGPT
-        const analysisPrompt = `${this.systemPrompt}\n\nThe following is a transcription of an audio clip:\n\n"${transcription}"\n\nDescribe this content in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the content. Do not return a structured JSON object, just answer naturally as you would to a user.`
+        // Fetch context from Weaviate
+        console.log("[LLMHelper] Fetching context from Weaviate...")
+        const context = await this.fetchWeaviateContext(transcription)
+        
+        // Build prompt with context if available
+        let userPrompt = `The following is a transcription of an audio clip:\n\n"${transcription}"\n\n`
+        
+        if (context && context.trim().length > 0) {
+          userPrompt += `\n**Relevant Context from Knowledge Base:**\n${context}\n\n`
+          console.log("[LLMHelper] Using Weaviate context in prompt")
+        } else {
+          console.log("[LLMHelper] No Weaviate context available")
+        }
+        
+        userPrompt += `Describe this content in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the content. Do not return a structured JSON object, just answer naturally as you would to a user.`
         
         const text = await this.callOpenAI([
           { role: 'system', content: this.systemPrompt },
-          { role: 'user', content: analysisPrompt }
+          { role: 'user', content: userPrompt }
         ])
         
         return { text, timestamp: Date.now() }
@@ -377,13 +477,27 @@ export class LLMHelper {
         // Use OpenAI Whisper to transcribe audio from base64
         console.log("[LLMHelper] Transcribing base64 audio with Whisper API...")
         const transcription = await this.transcribeAudioFromBase64WithWhisper(data, mimeType)
+        console.log("[LLMHelper] Transcription:", transcription)
         
-        // Now analyze the transcription with ChatGPT
-        const analysisPrompt = `${this.systemPrompt}\n\nThe following is a transcription of an audio clip:\n\n"${transcription}"\n\nDescribe this content in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the content. Do not return a structured JSON object, just answer naturally as you would to a user and be concise.`
+        // Fetch context from Weaviate
+        console.log("[LLMHelper] Fetching context from Weaviate...")
+        const context = await this.fetchWeaviateContext(transcription)
+        
+        // Build prompt with context if available
+        let userPrompt = `The following is a transcription of an audio clip:\n\n"${transcription}"\n\n`
+        
+        if (context && context.trim().length > 0) {
+          userPrompt += `\n**Relevant Context from Knowledge Base:**\n${context}\n\n`
+          console.log("[LLMHelper] Using Weaviate context in prompt")
+        } else {
+          console.log("[LLMHelper] No Weaviate context available")
+        }
+        
+        userPrompt += `Describe this content in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the content. Do not return a structured JSON object, just answer naturally as you would to a user and be concise.`
         
         const text = await this.callOpenAI([
           { role: 'system', content: this.systemPrompt },
-          { role: 'user', content: analysisPrompt }
+          { role: 'user', content: userPrompt }
         ])
         
         return { text, timestamp: Date.now() }
@@ -526,20 +640,20 @@ export class LLMHelper {
     }
     
     if (!this.model && !apiKey) {
-      throw new Error("No Gemini API key provided and no existing model instance");
+      throw new Error("No Gemini API key provided and no existing model instance")
     }
     
-    this.useOllama = false;
-    this.useOpenAI = false;
-    console.log("[LLMHelper] Switched to Gemini");
+    this.useOllama = false
+    this.useOpenAI = false
+    console.log("[LLMHelper] Switched to Gemini")
   }
 
   public async switchToOpenAI(apiKey: string, model?: string): Promise<void> {
-    this.openaiApiKey = apiKey;
-    this.openaiModel = model || "gpt-4o";
-    this.useOpenAI = true;
-    this.useOllama = false;
-    console.log(`[LLMHelper] Switched to OpenAI: ${this.openaiModel}`);
+    this.openaiApiKey = apiKey
+    this.openaiModel = model || "gpt-4o"
+    this.useOpenAI = true
+    this.useOllama = false
+    console.log(`[LLMHelper] Switched to OpenAI: ${this.openaiModel}`)
   }
 
   public async testConnection(): Promise<{ success: boolean; error?: string }> {
@@ -580,4 +694,4 @@ export class LLMHelper {
       return { success: false, error: error.message };
     }
   }
-} 
+}
